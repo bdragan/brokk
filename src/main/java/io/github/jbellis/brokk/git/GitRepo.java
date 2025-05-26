@@ -393,10 +393,16 @@ public class GitRepo implements Closeable, IGitRepo {
                     if (rejectionMessages.length() > 0) {
                         rejectionMessages.append("\n");
                     }
-                    rejectionMessages.append("Ref '").append(rru.getRemoteName())
-                                     .append("' update failed: ").append(status.toString());
-                    if (rru.getMessage() != null) {
-                        rejectionMessages.append(" (").append(rru.getMessage()).append(")");
+                    rejectionMessages.append("Ref '").append(rru.getRemoteName()).append("' update failed: ");
+                    if (status == RemoteRefUpdate.Status.REJECTED_NONFASTFORWARD ||
+                        status == RemoteRefUpdate.Status.REJECTED_REMOTE_CHANGED) {
+                        rejectionMessages.append("The remote contains work that you do not have locally. ")
+                                         .append("Pull and merge from the remote (or rebase) before pushing.");
+                    } else {
+                        rejectionMessages.append(status.toString());
+                        if (rru.getMessage() != null) {
+                            rejectionMessages.append(" (").append(rru.getMessage()).append(")");
+                        }
                     }
                 }
             }
