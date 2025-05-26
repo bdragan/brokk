@@ -1018,29 +1018,45 @@ public class WorkspacePanel extends JPanel {
     }
 
 
-    /** Edit Action: Only allows selecting Project Files */
-    private void doEditAction(List<? extends ContextFragment> selectedFragments) { // Use wildcard
-        var project = contextManager.getProject(); 
+    /** Edit Action: edit ONLY Git-tracked ProjectFiles */
+    private void doEditAction(List<? extends ContextFragment> selectedFragments) {
+        var project = contextManager.getProject();
+        var trackedFiles = project.getRepo().getTrackedFiles();  
+
+        // Gather candidate files
+        Set<ProjectFile> candidateFiles = new HashSet<>();
+
         if (selectedFragments.isEmpty()) {
             // Show dialog allowing ONLY file selection (no external)
-            var selection = showMultiSourceSelectionDialog("Edit Files",
-                                                           false, // No external files for edit
-                                                           CompletableFuture.completedFuture(project.getRepo().getTrackedFiles()), // Only tracked files
-                                                           Set.of(SelectionMode.FILES)); // Only FILES mode
-
+            var selection = showMultiSourceSelectionDialog(
+                    "Edit Files",
+                    false,                                          // No external files for edit
+                    CompletableFuture.completedFuture(trackedFiles),// autocomplete list
+                    Set.of(SelectionMode.FILES)                     // Only FILES mode
+            );
             if (selection != null && selection.files() != null && !selection.files().isEmpty()) {
                 // We disallowed external files, so this cast should be safe
                 var projectFiles = toProjectFilesUnsafe(selection.files());
-                contextManager.editFiles(projectFiles); 
+                candidateFiles.addAll(projectFiles);
             }
         } else {
-            // Edit files from selected fragments
-            var files = new HashSet<ProjectFile>();
+            // Collect files referenced by selected fragments
             for (var fragment : selectedFragments) {
-                files.addAll(fragment.files(project));
+                candidateFiles.addAll(fragment.files(project));
             }
-            contextManager.editFiles(files); 
         }
+
+        // Keep only git-tracked ProjectFiles
+        var filesToEdit = candidateFiles.stream()
+                                        .filter(trackedFiles::contains)
+                                        .collect(Collectors.toSet());
+
+        if (filesToEdit.isEmpty()) {
+            chrome.toolErrorRaw("No git-tracked files selected to edit.");
+            return;
+        }
+
+        contextManager.editFiles(filesToEdit);
     }
 
     /** Read Action: Allows selecting Files (internal/external) */
