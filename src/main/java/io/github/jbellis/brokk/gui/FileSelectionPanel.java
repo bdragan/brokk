@@ -317,6 +317,16 @@ public class FileSelectionPanel extends JPanel {
         }
 
         List<BrokkFile> result = new ArrayList<>(uniqueFiles.values());
+
+        // If external files are not allowed, keep only git-tracked project files.
+        if (!config.allowExternalFiles()) {
+            assert project != null : "project should not be null when external files are disallowed";
+            var tracked = project.getRepo().getTrackedFiles();
+            result = result.stream()
+                           .filter(file -> file instanceof ProjectFile pf && tracked.contains(pf))
+                           .collect(Collectors.toCollection(ArrayList::new));
+        }
+
         logger.debug("Resolved unique files: {}", result);
         // Notify listeners if selection changed (simple check for now)
         // currentSelection = result; // This needs a proper equality check if used for fine-grained listener notification
