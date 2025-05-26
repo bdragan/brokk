@@ -514,20 +514,18 @@ public class HistoryOutputPanel extends JPanel {
     /**
      * Sets the text in the LLM output area
      */
-    public void resetLlmOutput(ContextFragment.TaskFragment output, boolean forceScrollToTop) {
+    public void setLlmOutputAndCompact(ContextFragment.TaskFragment output, boolean forceScrollToTop) {
         // this is called by the context selection listener, but when we just finished streaming a response
         // we don't want scroll-to-top behavior (forceScrollToTop will be false in this case)
         setLlmOutput(output);
-        SwingUtilities.invokeLater(() -> {
-            if (forceScrollToTop) {
-                // Scroll to the top
-                llmScrollPane.getVerticalScrollBar().setValue(0);
-            } else {
-                // Scroll to the bottom
-                JScrollBar scrollBar = llmScrollPane.getVerticalScrollBar();
-                scrollBar.setValue(scrollBar.getMaximum());
-            }
-        });
+        llmStreamArea.scheduleCompaction().thenRun(
+                () -> {
+                    if (forceScrollToTop) {
+                        // Scroll to the top
+                        SwingUtilities.invokeLater(() -> llmScrollPane.getVerticalScrollBar().setValue(0));
+                    }
+                }
+        );
     }
 
     /**
@@ -601,7 +599,6 @@ public class HistoryOutputPanel extends JPanel {
      * Inner class representing a detached window for viewing output text
      */
     private static class OutputWindow extends JFrame {
-        private final HistoryOutputPanel parentPanel;
         private final Project project;
         /**
          * Creates a new output window with the given text content
@@ -624,17 +621,17 @@ public class HistoryOutputPanel extends JPanel {
                     // Silently ignore icon setting failures in child windows
                 }
                 
-                this.parentPanel = parentPanel;
                 this.project = parentPanel.contextManager.getProject(); // Get project reference
                 setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
 
             // Create markdown panel with the text
             var outputPanel = new MarkdownOutputPanel();
+            var scrollPane = new JScrollPane(outputPanel);
             outputPanel.updateTheme(isDark);
             outputPanel.setText(output);
+            outputPanel.scheduleCompaction().thenRun(() -> SwingUtilities.invokeLater(() -> scrollPane.getViewport().setViewPosition(new Point(0, 0))));;
 
             // Add to a scroll pane
-            var scrollPane = new JScrollPane(outputPanel);
             scrollPane.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
 
             // Add the scroll pane to the frame

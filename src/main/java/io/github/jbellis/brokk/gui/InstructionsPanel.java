@@ -151,7 +151,7 @@ public class InstructionsPanel extends JPanel implements IContextManager.Context
         codeButton.addActionListener(e -> runCodeCommand()); // Main button action
         codeButton.setMenuSupplier(() -> createModelSelectionMenu(
                 (modelName, reasoningLevel) -> {
-                    var models = chrome.getContextManager().getModels();
+                    var models = chrome.getContextManager().getService();
                     StreamingChatLanguageModel selectedModel = models.get(modelName, reasoningLevel);
                     if (selectedModel != null) {
                         runCodeCommand(selectedModel);
@@ -167,7 +167,7 @@ public class InstructionsPanel extends JPanel implements IContextManager.Context
         askButton.addActionListener(e -> runAskCommand()); // Main button action
         askButton.setMenuSupplier(() -> createModelSelectionMenu(
                 (modelName, reasoningLevel) -> {
-                    var models = chrome.getContextManager().getModels();
+                    var models = chrome.getContextManager().getService();
                     StreamingChatLanguageModel selectedModel = models.get(modelName, reasoningLevel);
                     if (selectedModel != null) {
                         runAskCommand(selectedModel);
@@ -913,11 +913,11 @@ public class InstructionsPanel extends JPanel implements IContextManager.Context
 
         // 8. Run ContextAgent
         logger.debug("Task {} fetching QUICK context recommendations for: '{}'", myGen, snapshot);
-        var model = contextManager.getModels().quickestModel();
+        var model = contextManager.getService().quickestModel();
         ContextAgent.RecommendationResult recommendations;
         try {
             ContextAgent agent = new ContextAgent(contextManager, model, snapshot, false);
-            recommendations = agent.getRecommendations();
+            recommendations = agent.getRecommendations(false);
 
             // 10. Process results
             if (!recommendations.success()) {
@@ -1073,14 +1073,14 @@ public class InstructionsPanel extends JPanel implements IContextManager.Context
         var contextManager = chrome.getContextManager();
         contextManager.submitBackgroundTask("", () -> {
             try {
-                float balance = contextManager.getModels().getUserBalance();
+                float balance = contextManager.getService().getUserBalance();
                 logger.debug("Checked balance: ${}", String.format("%.2f", balance));
 
                 // If balance drops below the minimum paid threshold, reinitialize models to enforce free tier
                 if (balance < Service.MINIMUM_PAID_BALANCE) {
                     logger.debug("Balance below minimum paid threshold (${}), reinitializing models to free tier.", Service.MINIMUM_PAID_BALANCE);
                     // This will refetch models and apply the lowBalance filter based on MINIMUM_PAID_BALANCE
-                    contextManager.reloadModels();
+                    contextManager.reloadModelsAsync();
 
                     SwingUtilities.invokeLater(() -> {
                         if (freeTierNotified) {
@@ -1155,6 +1155,7 @@ public class InstructionsPanel extends JPanel implements IContextManager.Context
                 chrome.systemOutput("Code Agent cancelled!");
                 // Save the partial result (if we didn't interrupt before we got any replies)
                 if (result.output().messages().stream().anyMatch(m -> m instanceof AiMessage)) {
+                    chrome.setSkipNextUpdateOutputPanelOnContextChange(true);
                     contextManager.addToHistory(result, false);
                 }
             } else {
@@ -1162,6 +1163,7 @@ public class InstructionsPanel extends JPanel implements IContextManager.Context
                     chrome.systemOutput("Code Agent complete!");
                 }
                 // Code agent has logged error to console already
+                chrome.setSkipNextUpdateOutputPanelOnContextChange(true);
                 contextManager.addToHistory(result, false);
             }
         } finally {
@@ -1195,6 +1197,7 @@ public class InstructionsPanel extends JPanel implements IContextManager.Context
                                                           List.copyOf(chrome.getLlmRawMessages()),
                                                           Map.of(), // No undo contents for Ask
                                                           new SessionResult.StopDetails(SessionResult.StopReason.SUCCESS));
+                    chrome.setSkipNextUpdateOutputPanelOnContextChange(true);
                     contextManager.addToHistory(sessionResult, false);
                     chrome.systemOutput("Ask command complete!");
                 } else {
@@ -1277,25 +1280,18 @@ public class InstructionsPanel extends JPanel implements IContextManager.Context
 
         try {
             chrome.showOutputSpinner("Executing command...");
-            chrome.llmOutput("```bash\n", ChatMessageType.CUSTOM);
+            chrome.llmOutput("\n```bash\n", ChatMessageType.CUSTOM);
             Environment.instance.runShellCommand(input,
                                                  contextManager.getRoot(),
                                                  line -> chrome.llmOutput(line + "\n", ChatMessageType.CUSTOM));
-            chrome.llmOutput("```\n", ChatMessageType.CUSTOM); // Close markdown block on success
+            chrome.llmOutput("\n```", ChatMessageType.CUSTOM); // Close markdown block on success
             chrome.systemOutput("Run command complete!");
         } catch (Environment.SubprocessException e) {
-            chrome.llmOutput("```\n", ChatMessageType.CUSTOM); // Ensure markdown block is closed on error
+            chrome.llmOutput("\n```", ChatMessageType.CUSTOM); // Ensure markdown block is closed on error
             actionMessage = "Run: " + input + " (failed: " + e.getMessage() + ")";
             chrome.systemOutput("Run command completed with errors -- see Output");
             logger.warn("Run command '{}' failed: {}", input, e.getMessage(), e);
-            // Display specific error message and output
-            String errorDisplay = """
-                                  **Command Failed:** %s
-                                  ```bash
-                                  %s
-                                  ```
-                                  """.stripIndent().formatted(e.getMessage(), e.getOutput());
-            chrome.llmOutput(errorDisplay, ChatMessageType.CUSTOM);
+            chrome.llmOutput("\n**Command Failed**", ChatMessageType.CUSTOM);
         } catch (InterruptedException e) {
             // If interrupted, the ```bash block might be open.
             // It's tricky to know if llmOutput for closing ``` is safe or needed here.
@@ -1325,7 +1321,7 @@ public class InstructionsPanel extends JPanel implements IContextManager.Context
         }
 
         var contextManager = chrome.getContextManager();
-        var models = contextManager.getModels();
+        var models = contextManager.getService();
         var architectModel = contextManager.getArchitectModel();
         var editModel = contextManager.getEditModel();
         var searchModel = contextManager.getSearchModel();
@@ -1386,7 +1382,7 @@ public class InstructionsPanel extends JPanel implements IContextManager.Context
         }
 
         var contextManager = chrome.getContextManager();
-        var models = contextManager.getModels();
+        var models = contextManager.getService();
 
         if (contextHasImages() && !models.supportsVision(modelToUse)) {
             showVisionSupportErrorDialog(models.nameOf(modelToUse) + " (Code)");
@@ -1419,7 +1415,7 @@ public class InstructionsPanel extends JPanel implements IContextManager.Context
         }
 
         var contextManager = chrome.getContextManager();
-        var models = contextManager.getModels();
+        var models = contextManager.getService();
 
         if (contextHasImages() && !models.supportsVision(modelToUse)) {
             showVisionSupportErrorDialog(models.nameOf(modelToUse) + " (Ask)");
@@ -1440,7 +1436,7 @@ public class InstructionsPanel extends JPanel implements IContextManager.Context
         }
 
         var contextManager = chrome.getContextManager();
-        var models = contextManager.getModels();
+        var models = contextManager.getService();
         var searchModel = contextManager.getSearchModel();
 
         if (contextHasImages() && !models.supportsVision(searchModel)) {
@@ -1482,8 +1478,10 @@ public class InstructionsPanel extends JPanel implements IContextManager.Context
         chrome.setLlmOutput(new ContextFragment.TaskFragment(cm.getParserForWorkspace(), List.of(new UserMessage(finalAction, input)), input));
         return cm.submitUserTask(finalAction, true, () -> {
             try {
+                chrome.showOutputSpinner("Executing " + action + " command...");
                 task.run();
             } finally {
+                chrome.hideOutputSpinner();
                 checkBalanceAndNotify();
                 checkFocusAndNotify(action);
             }
@@ -1633,7 +1631,7 @@ public class InstructionsPanel extends JPanel implements IContextManager.Context
      *                      Receives the model name and the reasoning level configured for that favorite.
      * @return A JPopupMenu containing available favorite models or configuration options.
      */
-    private JPopupMenu createModelSelectionMenu(BiConsumer<String, Project.ReasoningLevel> onModelSelect)
+    private JPopupMenu createModelSelectionMenu(BiConsumer<String, Service.ReasoningLevel> onModelSelect)
     {
         var popupMenu = new JPopupMenu();
         if (this.contextManager == null) {
@@ -1646,12 +1644,11 @@ public class InstructionsPanel extends JPanel implements IContextManager.Context
             return popupMenu;
         }
 
-        var modelsInstance = this.contextManager.getModels();
+        var modelsInstance = this.contextManager.getService();
         Map<String, String> availableModelsMap = modelsInstance.getAvailableModels(); // Get all available models
 
         // Cast the result of loadFavoriteModels and ensure it's handled correctly
-        @SuppressWarnings("unchecked") // Suppress warning for the cast from Object/ANY
-        List<Service.FavoriteModel> favoriteModels = (List<Service.FavoriteModel>) Project.loadFavoriteModels();
+        List<Service.FavoriteModel> favoriteModels = Project.loadFavoriteModels();
 
         // Filter favorite models to show only those that are currently available, and sort by alias
         List<Service.FavoriteModel> favoriteModelsToShow = favoriteModels.stream()

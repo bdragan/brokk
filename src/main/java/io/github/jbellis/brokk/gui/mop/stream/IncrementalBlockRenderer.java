@@ -100,15 +100,12 @@ public final class IncrementalBlockRenderer {
         // Filter out edit blocks if disabled
         if (enableEditBlocks) {
             activeFactories = FACTORIES;
-            logger.debug("Edit blocks enabled");
         } else {
             activeFactories = FACTORIES.entrySet().stream()
                     .filter(e -> !"edit-block".equals(e.getKey()))
                     .collect(Collectors.toUnmodifiableMap(Map.Entry::getKey, Map.Entry::getValue));
-            logger.debug("Edit blocks disabled");
         }
-        
-        logger.debug("Initialized IncrementalBlockRenderer with Flexmark parser and custom extensions");
+
     }
     
     /**
@@ -147,6 +144,29 @@ public final class IncrementalBlockRenderer {
         List<ComponentData> components = buildComponentData(html);
         
         // Update the UI with the reconciled components
+        // This method is typically called for initial non-streaming updates or full replacements.
+        // Ensure UI updates happen on EDT.
+        if (SwingUtilities.isEventDispatchThread()) {
+            updateUI(components);
+        } else {
+            SwingUtilities.invokeLater(() -> updateUI(components));
+        }
+    }
+    
+    /**
+     * Thread-safe version of update that separates parsing from UI updates.
+     * This method can be called from any thread, with only the UI update
+     * happening on the EDT.
+     * 
+     * @param components The component data to apply to the UI
+     */
+    public void applyUI(List<ComponentData> components) {
+        if (compacted) {
+            logger.warn("[COMPACTION] applyUI skipped - renderer already compacted. Incoming size: {}",
+                        components == null ? "null" : components.size());
+            return;
+        }
+        assert SwingUtilities.isEventDispatchThread() : "applyUI must be called on EDT";
         updateUI(components);
     }
     
@@ -159,9 +179,12 @@ public final class IncrementalBlockRenderer {
         Reconciler.reconcile(root, components, registry, isDarkTheme);
     }
 
-    /* package */ String createHtml(String md) {
+    public String createHtml(CharSequence md) {
         // Parse with Flexmark
-        var document = parser.parse(md);
+        // Parser.parse expects a String or BasedSequence. Convert CharSequence to String.
+        String markdownString = md.toString(); // Convert once
+        this.lastMarkdown = markdownString;    // Store it for compaction
+        var document = parser.parse(markdownString); // Parse the stored string
         return renderer.render(document);  // Don't sanitize yet - let MarkdownComponentData handle it
     }
     
@@ -183,7 +206,7 @@ public final class IncrementalBlockRenderer {
      * @param html The HTML string to parse
      * @return A list of ComponentData objects in document order
      */
-    /* package */ List<ComponentData> buildComponentData(String html) {
+    public List<ComponentData> buildComponentData(String html) {
         List<ComponentData> result = new ArrayList<>();
         
         Document doc = Jsoup.parse(html);
@@ -243,39 +266,68 @@ public final class IncrementalBlockRenderer {
     }
     
     /**
-     * Merges consecutive MarkdownComponentData blocks that have no intervening special blocks
-     * (code-fence, edit-block, etc.). Safe to call multiple times; subsequent invocations are no-ops.
-     * This method should be called only after streaming is complete to ensure a consistent user
-     * experience for text selection.
+     * Builds a snapshot of what the component data would look like if compacted.
+     * This method performs CPU-intensive work and should be called off the EDT.
+     * It does not modify the renderer's state.
+     *
+     * @return A list of {@link ComponentData} representing the compacted state,
+     *         or {@code null} if compaction is not needed (e.g., already compacted or no content).
      */
-    public void compactMarkdown() {
+    public List<ComponentData> buildCompactedSnapshot(long roundId) {
+        // This check is a hint; the authoritative 'compacted' flag is checked on EDT in applyCompactedSnapshot.
         if (compacted) {
-            logger.debug("Renderer already compacted - skipping");
+            return null;
+        }
+        if (lastMarkdown.isEmpty()) {
+            return null;
+        }
+
+        var html = createHtml(lastMarkdown);
+        var originalComponents = buildComponentData(html);
+        var merged = mergeMarkdownBlocks(originalComponents, roundId);
+        return merged;
+    }
+
+    /**
+     * Applies a previously built compacted snapshot to the UI.
+     * This method must be called on the EDT. It updates the renderer's state.
+     *
+     * @param mergedComponents The list of {@link ComponentData} from {@link #buildCompactedSnapshot(long)}.
+     *                         If {@code null}, it typically means compaction was skipped or not needed.
+     */
+    public void applyCompactedSnapshot(List<ComponentData> mergedComponents, long roundId) {
+        assert SwingUtilities.isEventDispatchThread() : "applyCompactedSnapshot must be called on EDT";
+
+        if (compacted) { // Authoritative check on EDT
             return;
         }
 
-        // Rebuild components from the last known markdown content
-        List<ComponentData> originalComponents;
-        if (!lastMarkdown.isEmpty()) {
-            var html = createHtml(lastMarkdown);
-            originalComponents = buildComponentData(html);
-        } else {
-            logger.debug("No markdown content to compact - skipping");
+        // Case 1: No initial markdown content. Mark as compacted and do nothing else.
+        if (lastMarkdown.isEmpty()) {
             compacted = true;
             return;
         }
 
-        var merged = mergeMarkdownBlocks(originalComponents);
-        logger.debug("Compacting markdown blocks: {} -> {}", originalComponents.size(), merged.size());
-        updateUI(merged);
+        // Case 2: buildCompactedSnapshot decided not to produce components (e.g., it thought it was already compacted, or content was empty).
+        // Mark as compacted.
+        if (mergedComponents == null) {
+            compacted = true;
+            return;
+        }
+        
+        // Case 3: Actual compaction and UI update.
+        int currentComponentCountBeforeUpdate = root.getComponentCount();
+        logger.debug("[COMPACTION][{}] Apply snapshot: Compacting. UI components before update: {}, New data component count: {}",
+                     roundId, currentComponentCountBeforeUpdate, mergedComponents.size());
+        updateUI(mergedComponents); 
         compacted = true;
-        // Update the last markdown to reflect the merged state for future builds
-        // Reconstruct markdown content from merged components to ensure consistency
-        lastMarkdown = merged.stream()
-                             .filter(cd -> cd instanceof MarkdownComponentData)
-                             .map(cd -> ((MarkdownComponentData) cd).html())
-                             .collect(Collectors.joining("\n"));
-        lastHtmlFingerprint = merged.stream().map(ComponentData::fp).collect(Collectors.joining("-"));
+
+        // Update lastMarkdown and lastHtmlFingerprint to reflect the merged state.
+        this.lastMarkdown = mergedComponents.stream()
+                                         .filter(cd -> cd instanceof MarkdownComponentData)
+                                         .map(cd -> ((MarkdownComponentData) cd).html())
+                                         .collect(Collectors.joining("\n"));
+        this.lastHtmlFingerprint = mergedComponents.stream().map(ComponentData::fp).collect(Collectors.joining("-"));
     }
 
     /**
@@ -284,7 +336,7 @@ public final class IncrementalBlockRenderer {
      * @param src The source list of ComponentData objects
      * @return A new list with consecutive MarkdownComponentData blocks merged
      */
-    private List<ComponentData> mergeMarkdownBlocks(List<ComponentData> src) {
+    private List<ComponentData> mergeMarkdownBlocks(List<ComponentData> src, long roundId) {
         var out = new ArrayList<ComponentData>();
         MarkdownComponentData acc = null;
         StringBuilder htmlBuf = null;
@@ -298,13 +350,17 @@ public final class IncrementalBlockRenderer {
                     htmlBuf.append('\n').append(md.html());
                 }
             } else {
-                flush(out, acc, htmlBuf);
+                flush(out, acc, htmlBuf, roundId);
                 out.add(cd);
                 acc = null;
                 htmlBuf = null;
             }
         }
-        flush(out, acc, htmlBuf);
+        flush(out, acc, htmlBuf, roundId);
+        if (out.size() > 1 && src.stream().allMatch(c -> c instanceof MarkdownComponentData)) {
+             logger.warn("[COMPACTION][{}] mergeMarkdownBlocks: Multiple MarkdownComponentData blocks in source did not merge into one. Output size: {}. Source types: {}",
+                         roundId, out.size(), src.stream().map(c -> c.getClass().getSimpleName()).collect(Collectors.joining(", ")));
+        }
         return out;
     }
 
@@ -315,7 +371,7 @@ public final class IncrementalBlockRenderer {
      * @param acc The accumulated MarkdownComponentData
      * @param htmlBuf The StringBuilder containing the merged HTML content
      */
-    private void flush(List<ComponentData> out, MarkdownComponentData acc, StringBuilder htmlBuf) {
+    private void flush(List<ComponentData> out, MarkdownComponentData acc, StringBuilder htmlBuf, long roundId) {
         if (acc == null || htmlBuf == null) return;
         var merged = markdownFactory.fromText(acc.id(), htmlBuf.toString());
         out.add(merged);

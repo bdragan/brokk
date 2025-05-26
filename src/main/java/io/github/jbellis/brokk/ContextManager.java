@@ -105,7 +105,7 @@ public class ContextManager implements IContextManager, AutoCloseable {
                                    Executors.defaultThreadFactory()),
             Set.of(InterruptedException.class));
 
-    private final ModelsWrapper models;
+    private final ServiceWrapper service;
     private final Project project;
     private final ToolRegistry toolRegistry;
 
@@ -134,8 +134,8 @@ public class ContextManager implements IContextManager, AutoCloseable {
     {
         this.project = project;
         this.contextHistory = new ContextHistory();
-        this.models = new ModelsWrapper();
-        this.models.reinit(project);
+        this.service = new ServiceWrapper();
+        this.service.reinit(project);
 
         // set up global tools
         this.toolRegistry = new ToolRegistry(this);
@@ -387,54 +387,81 @@ public class ContextManager implements IContextManager, AutoCloseable {
      * Returns the Models instance associated with this context manager.
      */
     @Override
-    public Service getModels() {
-        return models.get();
+    public Service getService() {
+        return service.get();
     }
 
     /**
      * Returns the configured Architect model, falling back to the system model if unavailable.
      */
     public StreamingChatLanguageModel getArchitectModel() {
-        var modelName = project.getArchitectModelName();
-        var reasoning = project.getArchitectReasoningLevel();
-        return models.get(modelName, reasoning);
+        var config = project.getArchitectModelConfig();
+        return getModelOrDefault(config, "Architect");
     }
 
     /**
      * Returns the configured Code model, falling back to the system model if unavailable.
      */
     public StreamingChatLanguageModel getCodeModel() {
-        var modelName = project.getCodeModelName();
-        var reasoning = project.getCodeReasoningLevel();
-        return models.get(modelName, reasoning);
+        var config = project.getCodeModelConfig();
+        return getModelOrDefault(config, "Code");
     }
 
     /**
      * Returns the configured Ask model, falling back to the system model if unavailable.
      */
     public StreamingChatLanguageModel getAskModel() {
-        var modelName = project.getAskModelName();
-        var reasoning = project.getAskReasoningLevel();
-        return models.get(modelName, reasoning);
+        var config = project.getAskModelConfig();
+        return getModelOrDefault(config, "Ask");
     }
-
 
     /**
      * Returns the configured Edit model, falling back to the system model if unavailable.
      */
     public StreamingChatLanguageModel getEditModel() {
-        var modelName = project.getEditModelName();
-        var reasoning = project.getEditReasoningLevel();
-        return models.get(modelName, reasoning);
+        var config = project.getEditModelConfig();
+        return getModelOrDefault(config, "Edit");
     }
 
     /**
      * Returns the configured Search model, falling back to the system model if unavailable.
      */
     public StreamingChatLanguageModel getSearchModel() {
-        var modelName = project.getSearchModelName();
-        var reasoning = project.getSearchReasoningLevel();
-        return models.get(modelName, reasoning);
+        var config = project.getSearchModelConfig();
+        return getModelOrDefault(config, "Search");
+    }
+
+    private StreamingChatLanguageModel getModelOrDefault(Service.ModelConfig config, String modelTypeName) {
+        StreamingChatLanguageModel model = service.getModel(config.name(), config.reasoning());
+        if (model != null) {
+            return model;
+        }
+
+        // Configured model is not available. Attempt fallbacks.
+        String chosenFallbackName = Service.GEMINI_2_5_PRO; // For the io.toolError message
+        model = service.getModel(Service.GEMINI_2_5_PRO, Service.ReasoningLevel.DEFAULT);
+        if (model != null) {
+            io.toolErrorRaw(String.format("Configured model '%s' for %s tasks is unavailable. Using fallback '%s'.",
+                                          config.name(), modelTypeName, chosenFallbackName));
+            return model;
+        }
+
+        chosenFallbackName = Service.GROK_3_MINI;
+        model = service.getModel(Service.GROK_3_MINI, Service.ReasoningLevel.DEFAULT);
+        if (model != null) {
+            io.toolErrorRaw(String.format("Configured model '%s' for %s tasks is unavailable. Using fallback '%s'.",
+                                          config.name(), modelTypeName, chosenFallbackName));
+            return model;
+        }
+
+        var quickModel = service.get().quickModel();
+        // Determine the "name" of the quick model for the error message.
+        // This is a bit of a heuristic as quickModel() doesn't directly expose its config name.
+        // We iterate known models to find a match; otherwise, use a generic placeholder.
+        String quickModelName = service.get().nameOf(quickModel);
+        io.toolErrorRaw(String.format("Configured model '%s' for %s tasks is unavailable. Preferred fallbacks also failed. Using system model '%s'.",
+                                      config.name(), modelTypeName, quickModelName));
+        return quickModel;
     }
 
     public Future<?> submitUserTask(String description, Runnable task) {
@@ -1081,7 +1108,7 @@ public class ContextManager implements IContextManager, AutoCloseable {
                                            project.getRoot().getFileName(), // Show just the folder name
                                            project.getRepo().getTrackedFiles().size(),
                                            project.getAllFiles().size(),
-                                           project.getAnalyzerLanguage());
+                                           project.getAnalyzerLanguages());
     }
 
     /**
@@ -1417,7 +1444,7 @@ public class ContextManager implements IContextManager, AutoCloseable {
                     List<ChatMessage> messages = List.of(userMessage);
                     Llm.StreamingResult result;
                     try {
-                        result = getLlm(models.quickModel(), "Summarize pasted image").sendRequest(messages);
+                        result = getLlm(service.quickModel(), "Summarize pasted image").sendRequest(messages);
                     } catch (InterruptedException e) {
                         throw new RuntimeException(e);
                     }
@@ -1538,9 +1565,8 @@ public class ContextManager implements IContextManager, AutoCloseable {
         return EditBlockParser.getParserFor(allText);
     }
 
-    public Service reloadModels() {
-        models.reinit(project);
-        return models.get();
+    public void reloadModelsAsync() {
+        service.reinit(project);
     }
 
     @FunctionalInterface
@@ -1666,7 +1692,7 @@ public class ContextManager implements IContextManager, AutoCloseable {
         var msgs = SummarizerPrompts.instance.compressHistory(historyString);
         Llm.StreamingResult result;
         try {
-            result = getLlm(models.quickModel(), "Compress history entry").sendRequest(msgs);
+            result = getLlm(service.quickModel(), "Compress history entry").sendRequest(msgs);
         } catch (InterruptedException e) {
             throw new RuntimeException(e);
         }
@@ -1794,7 +1820,7 @@ public class ContextManager implements IContextManager, AutoCloseable {
             // Use quickModel for summarization
             Llm.StreamingResult result;
             try {
-                result = getLlm(models.quickestModel(), "Summarize: " + content).sendRequest(msgs);
+                result = getLlm(service.quickestModel(), "Summarize: " + content).sendRequest(msgs);
             } catch (InterruptedException e) {
                 throw new RuntimeException(e);
             }

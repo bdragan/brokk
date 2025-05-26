@@ -70,7 +70,7 @@ public class LlmTest {
             }
 
             @Override
-            public Service getModels() {
+            public Service getService() {
                 return models;
             }
         };
@@ -88,7 +88,7 @@ public class LlmTest {
 //    @Test
     void testModels() {
         // Get Models instance from ContextManager
-        var models = contextManager.getModels();
+        var models = contextManager.getService();
         var availableModels = models.getAvailableModels();
         Assumptions.assumeFalse(availableModels.isEmpty(), "No models available via LiteLLM, skipping testModels test.");
 
@@ -99,7 +99,7 @@ public class LlmTest {
             try {
                 System.out.println("Testing model: " + modelName);
                 // Get model instance via the Models object
-                StreamingChatLanguageModel model = models.get(modelName, Project.ReasoningLevel.DEFAULT);
+                StreamingChatLanguageModel model = models.get(modelName, Service.ReasoningLevel.DEFAULT);
                 var coder = contextManager.getLlm(model, "testModels");
                 assertNotNull(model, "Failed to get model instance for: " + modelName);
 
@@ -142,7 +142,7 @@ public class LlmTest {
     // uncomment when you need it, this makes live API calls
 //    @Test
     void testToolCalling() {
-        var models = contextManager.getModels();
+        var models = contextManager.getService();
         var availableModels = models.getAvailableModels();
         Assumptions.assumeFalse(availableModels.isEmpty(), "No models available via LiteLLM, skipping testToolCalling test.");
 
@@ -156,7 +156,7 @@ public class LlmTest {
                 .forEach(modelName -> {
                     try {
                         System.out.println("Testing tool calling for model: " + modelName);
-                        StreamingChatLanguageModel model = models.get(modelName, Project.ReasoningLevel.DEFAULT);
+                        StreamingChatLanguageModel model = models.get(modelName, Service.ReasoningLevel.DEFAULT);
                         var coder = contextManager.getLlm(model, "testToolCalling");
                         assertNotNull(model, "Failed to get model instance for: " + modelName);
 

@@ -33,8 +33,24 @@ public class Chrome implements AutoCloseable, IConsoleIO, IContextManager.Contex
     // Used as the default text for the background tasks label
     private final String BGTASK_EMPTY = "No background tasks";
 
-    // is the change of the context triggered by a user or the system?
-    private boolean internalContextChange = true;
+    // is a setContext updating the MOP?
+    private boolean skipNextUpdateOutputPanelOnContextChange = false;
+
+    /**
+     * Gets whether updates to the output panel are skipped on context changes.
+     * @return true if updates are skipped, false otherwise
+     */
+    public boolean isSkipNextUpdateOutputPanelOnContextChange() {
+        return skipNextUpdateOutputPanelOnContextChange;
+    }
+
+    /**
+     * Sets whether updates to the output panel should be skipped on context changes.
+     * @param skipNextUpdateOutputPanelOnContextChange true to skip updates, false otherwise
+     */
+    public void setSkipNextUpdateOutputPanelOnContextChange(boolean skipNextUpdateOutputPanelOnContextChange) {
+        this.skipNextUpdateOutputPanelOnContextChange = skipNextUpdateOutputPanelOnContextChange;
+    }
 
     // Dependencies:
     final ContextManager contextManager;
@@ -329,16 +345,11 @@ public class Chrome implements AutoCloseable, IConsoleIO, IContextManager.Contex
     public void setContext(Context ctx) {
         assert ctx != null;
 
-        // If the new context is logically distinct from the active one, update the text.
-        // This prevents stomping on an active llm output since it will only be the case
-        // if the user is selecting a different context, as opposed to a background task
-        // updating the summary or autocontext.
         logger.trace("Loading context.  active={}, new={}", activeContext == null ? "null" : activeContext.getId(), ctx.getId());
-        // If internalContextChange is true, it means it's a programmatic selection (new history item),
-        // so don't force scroll. Otherwise (user click), do force scroll. Do not scroll the welcome message (id=1)
-        boolean forceScrollToTop = !this.internalContextChange || ctx.getId() == 1;
+        // If skipUpdateOutputPanelOnContextChange is true it is not updating the MOP => end of runSessions should not scroll MOP away 
 
-        boolean resetOutput = (activeContext == null || activeContext.getId() != ctx.getId());
+        final boolean updateOutput = ((activeContext == null || activeContext.getId() != ctx.getId()) && !isSkipNextUpdateOutputPanelOnContextChange());
+        setSkipNextUpdateOutputPanelOnContextChange(false);
         activeContext = ctx;
 
         SwingUtilities.invokeLater(() -> {
@@ -355,9 +366,9 @@ public class Chrome implements AutoCloseable, IConsoleIO, IContextManager.Contex
             }
             // workspacePanel is a final field initialized in the constructor, so it won't be null here.
             workspacePanel.setWorkspaceEditable(isEditable);
-            if (resetOutput) {
+            if (updateOutput) {
                 if (ctx.getParsedOutput() != null) {
-                    historyOutputPanel.resetLlmOutput(ctx.getParsedOutput(), forceScrollToTop);
+                    historyOutputPanel.setLlmOutputAndCompact(ctx.getParsedOutput(), true);
                 } else {
                     historyOutputPanel.clearLlmOutput();
                 }
@@ -559,8 +570,6 @@ public class Chrome implements AutoCloseable, IConsoleIO, IContextManager.Contex
 
             // Also update HistoryOutputPanel's local buttons
             if (historyOutputPanel != null) historyOutputPanel.updateUndoRedoButtonStates();
-
-            // Update the main context table and history table display
             setContext(newCtx); // Handles contextPanel update and historyOutputPanel.resetLlmOutput
             updateContextHistoryTable(newCtx); // Handles historyOutputPanel.updateHistoryTable
         });
@@ -708,19 +717,26 @@ public class Chrome implements AutoCloseable, IConsoleIO, IContextManager.Contex
                                                 UIManager.getColor("Panel.background") : Color.WHITE);
 
                 // Get all messages and create a MarkdownOutputPanel for each
+                var scrollPane = new JScrollPane(messagesContainer);
+                scrollPane.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+                scrollPane.getVerticalScrollBar().setUnitIncrement(16);
+
                 List<TaskEntry> taskEntries = outputFragment.entries();
+                var compactionFutures = new ArrayList<CompletableFuture<?>>();
                 for (TaskEntry entry : taskEntries) {
                     var markdownPanel = new MarkdownOutputPanel();
                     markdownPanel.updateTheme(themeManager != null && themeManager.isDarkTheme());
                     markdownPanel.setText(entry);
                     markdownPanel.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, Color.GRAY));
                     messagesContainer.add(markdownPanel);
+                    compactionFutures.add(markdownPanel.scheduleCompaction());
                 }
 
-                // Wrap in a scroll pane
-                var scrollPane = new JScrollPane(messagesContainer);
-                scrollPane.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
-                scrollPane.getVerticalScrollBar().setUnitIncrement(16);
+                // When all panels are compacted, scroll to the top
+                CompletableFuture
+                        .allOf(compactionFutures.toArray(CompletableFuture[]::new))
+                        .thenRun(() -> SwingUtilities.invokeLater(() ->
+                                scrollPane.getViewport().setViewPosition(new Point(0, 0))));
 
                 showPreviewFrame(contextManager, title, scrollPane); // Use helper
                 return;
@@ -879,12 +895,7 @@ public class Chrome implements AutoCloseable, IConsoleIO, IContextManager.Contex
     }
 
     public void updateContextHistoryTable(Context contextToSelect) {
-        this.internalContextChange = true;
-        try {
             historyOutputPanel.updateHistoryTable(contextToSelect);
-        } finally {
-            SwingUtilities.invokeLater(() -> this.internalContextChange = false);
-        }
     }
 
     public boolean isPositionOnScreen(int x, int y) {

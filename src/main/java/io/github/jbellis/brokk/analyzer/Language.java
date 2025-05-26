@@ -4,7 +4,6 @@ import io.github.jbellis.brokk.Project;
 import io.github.jbellis.brokk.util.Environment;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.jetbrains.annotations.NotNull;
 
 import java.io.IOException;
 import java.nio.file.DirectoryStream;
@@ -20,9 +19,21 @@ public interface Language {
     Logger logger = LogManager.getLogger(Language.class);
 
     List<String> getExtensions();
-    String name();
+    String name(); // Human-friendly
+    String internalName(); // Filesystem-safe
     IAnalyzer createAnalyzer(Project project);
     IAnalyzer loadAnalyzer(Project project);
+
+    /**
+     * Get the path where the CPG for this language in the given project should be stored.
+     * @param project The project.
+     * @return The path to the CPG file.
+     */
+    default Path getCpgPath(Project project) {
+        // Use oldName for CPG path to ensure stable and filesystem-safe names
+        return project.getRoot().resolve(".brokk").resolve(internalName().toLowerCase() + ".cpg");
+    }
+
     default List<Path> getDependencyCandidates(Project project) {
         return List.of();
     }
@@ -50,7 +61,8 @@ public interface Language {
     Language C_SHARP = new Language() {
         private final List<String> extensions = List.of("cs");
         @Override public List<String> getExtensions() { return extensions; }
-        @Override public String name() { return "C_SHARP"; }
+        @Override public String name() { return "C#"; }
+        @Override public String internalName() { return "C_SHARP"; }
         @Override public String toString() { return name(); } // For compatibility
         @Override public IAnalyzer createAnalyzer(Project project) {
             return new CSharpAnalyzer(project, project.getBuildDetails().excludedDirectories());
@@ -61,20 +73,17 @@ public interface Language {
     Language JAVA = new Language() {
         private final List<String> extensions = List.of("java");
         @Override public List<String> getExtensions() { return extensions; }
-        @Override public String name() { return "JAVA"; }
+        @Override public String name() { return "Java"; }
+        @Override public String internalName() { return "JAVA"; }
         @Override public String toString() { return name(); }
         @Override public IAnalyzer createAnalyzer(Project project) {
             var analyzer = new JavaAnalyzer(project.getRoot(), project.getBuildDetails().excludedDirectories());
-            analyzer.writeCpg(getAnalyzerPath(project));
+            analyzer.writeCpg(getCpgPath(project));
             return analyzer;
         }
 
-        private static @NotNull Path getAnalyzerPath(Project project) {
-            return project.getRoot().resolve(".brokk").resolve("joern.cpg");
-        }
-
         @Override public JavaAnalyzer loadAnalyzer(Project project) {
-            return new JavaAnalyzer(project.getRoot(), getAnalyzerPath(project));
+            return new JavaAnalyzer(project.getRoot(), getCpgPath(project));
         }
 
         @Override
@@ -176,7 +185,8 @@ public interface Language {
     Language JAVASCRIPT = new Language() {
         private final List<String> extensions = List.of("js", "mjs", "cjs", "jsx");
         @Override public List<String> getExtensions() { return extensions; }
-        @Override public String name() { return "JAVASCRIPT"; }
+        @Override public String name() { return "JavaScript"; }
+        @Override public String internalName() { return "JAVASCRIPT"; }
         @Override public String toString() { return name(); }
         @Override public IAnalyzer createAnalyzer(Project project) {
             return new JavascriptAnalyzer(project, project.getBuildDetails().excludedDirectories());
@@ -240,7 +250,8 @@ public interface Language {
     Language PYTHON = new Language() {
         private final List<String> extensions = List.of("py");
         @Override public List<String> getExtensions() { return extensions; }
-        @Override public String name() { return "PYTHON"; }
+        @Override public String name() { return "Python"; }
+        @Override public String internalName() { return "PYTHON"; }
         @Override public String toString() { return name(); }
         @Override public IAnalyzer createAnalyzer(Project project) {
             return new PythonAnalyzer(project, project.getBuildDetails().excludedDirectories());
@@ -373,20 +384,17 @@ public interface Language {
     Language C_CPP = new Language() {
         private final List<String> extensions = List.of("c", "h", "cpp", "hpp", "cc", "hh", "cxx", "hxx");
         @Override public List<String> getExtensions() { return extensions; }
-        @Override public String name() { return "C_CPP"; }
+        @Override public String name() { return "C/C++"; }
+        @Override public String internalName() { return "C_CPP"; }
         @Override public String toString() { return name(); }
         @Override public IAnalyzer createAnalyzer(Project project) {
             var analyzer = new CppAnalyzer(project.getRoot(), project.getBuildDetails().excludedDirectories());
-            analyzer.writeCpg(getAnalyzerPath(project));
+            analyzer.writeCpg(getCpgPath(project));
             return analyzer;
         }
 
-        private static @NotNull Path getAnalyzerPath(Project project) {
-            return project.getRoot().resolve(".brokk").resolve("joern.cpg");
-        }
-
         @Override public CppAnalyzer loadAnalyzer(Project project) {
-            return new CppAnalyzer(project.getRoot(), getAnalyzerPath(project));
+            return new CppAnalyzer(project.getRoot(), getCpgPath(project));
         }
         @Override
         public boolean isCpg() { return true; }
@@ -395,7 +403,8 @@ public interface Language {
     Language GO = new Language() {
         private final List<String> extensions = List.of("go");
         @Override public List<String> getExtensions() { return extensions; }
-        @Override public String name() { return "GO"; }
+        @Override public String name() { return "Go"; }
+        @Override public String internalName() { return "GO"; }
         @Override public String toString() { return name(); }
         @Override public IAnalyzer createAnalyzer(Project project) {
             return new GoAnalyzer(project, project.getBuildDetails().excludedDirectories());
@@ -407,7 +416,8 @@ public interface Language {
     Language RUST = new Language() {
         private final List<String> extensions = List.of("rs");
         @Override public List<String> getExtensions() { return extensions; }
-        @Override public String name() { return "RUST"; }
+        @Override public String name() { return "Rust"; }
+        @Override public String internalName() { return "RUST"; }
         @Override public String toString() { return name(); }
         @Override public IAnalyzer createAnalyzer(Project project) {
             return new RustAnalyzer(project, project.getBuildDetails().excludedDirectories());
@@ -442,7 +452,8 @@ public interface Language {
     Language NONE = new Language() {
         private final List<String> extensions = Collections.emptyList();
         @Override public List<String> getExtensions() { return extensions; }
-        @Override public String name() { return "NONE"; }
+        @Override public String name() { return "None"; }
+        @Override public String internalName() { return "NONE"; }
         @Override public String toString() { return name(); }
         @Override public IAnalyzer createAnalyzer(Project project) {
             return new DisabledAnalyzer();
@@ -456,6 +467,7 @@ public interface Language {
         private final List<String> extensions = List.of("php", "phtml", "php3", "php4", "php5", "phps");
         @Override public List<String> getExtensions() { return extensions; }
         @Override public String name() { return "PHP"; }
+        @Override public String internalName() { return "PHP"; }
         @Override public String toString() { return name(); }
         @Override public IAnalyzer createAnalyzer(Project project) {
             return new PhpAnalyzer(project, project.getBuildDetails().excludedDirectories());
@@ -483,6 +495,25 @@ public interface Language {
     };
 
     // --- Infrastructure for fromExtension and enum-like static methods ---
+    // The ALL_LANGUAGES list is defined after all Language instances (including SQL) are defined.
+
+    Language SQL = new Language() {
+        private final List<String> extensions = List.of("sql");
+        @Override public List<String> getExtensions() { return extensions; }
+        @Override public String name() { return "SQL"; }
+        @Override public String internalName() { return "SQL"; }
+        @Override public String toString() { return name(); }
+        @Override public IAnalyzer createAnalyzer(Project project) {
+            var excludedDirStrings = project.getBuildDetails().excludedDirectories();
+            var excludedPaths = excludedDirStrings.stream().map(Path::of).collect(java.util.stream.Collectors.toSet());
+            return new SqlAnalyzer(project, excludedPaths);
+        }
+        @Override public IAnalyzer loadAnalyzer(Project project) {
+            // SQLAnalyzer does not save/load state from disk beyond re-parsing
+            return createAnalyzer(project);
+        }
+        @Override public boolean isCpg() { return false; }
+    };
 
     List<Language> ALL_LANGUAGES = List.of(C_SHARP,
                                            JAVA,
@@ -491,7 +522,8 @@ public interface Language {
                                            C_CPP,
                                            GO,
                                            RUST,
-                                           PHP, // Added PHP here
+                                           PHP,
+                                           SQL, // SQL is now defined and can be included
                                            NONE);
 
     /**
@@ -543,7 +575,8 @@ public interface Language {
     static Language valueOf(String name) {
         Objects.requireNonNull(name, "Name is null");
         for (Language lang : ALL_LANGUAGES) {
-            if (lang.name().equals(name)) {
+            // Check current human-friendly name first, then old programmatic name for backward compatibility.
+            if (lang.name().equals(name) || lang.internalName().equals(name)) {
                 return lang;
             }
         }

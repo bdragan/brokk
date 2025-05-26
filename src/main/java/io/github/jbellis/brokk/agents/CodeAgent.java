@@ -84,7 +84,7 @@ public class CodeAgent {
         // We'll collect the conversation as ChatMessages to store in context history.
         var sessionMessages = new ArrayList<ChatMessage>();
         UserMessage nextRequest = CodePrompts.instance.codeRequest(userInput.trim(),
-                                                                   CodePrompts.reminderForModel(contextManager.getModels(), model),
+                                                                   CodePrompts.reminderForModel(contextManager.getService(), model),
                                                                    parser);
 
         while (true) {
@@ -417,7 +417,7 @@ public class CodeAgent {
                  // Prepare request
                  var goal = "The previous attempt to modify this file using SEARCH/REPLACE failed repeatedly. Original goal: " + originalUserInput;
                  var messages = CodePrompts.instance.collectFullFileReplacementMessages(contextManager, file, goal, sessionMessages);
-                 var coder = contextManager.getLlm(contextManager.getModels().quickModel(), "Full File Replacement: " + file.getFileName());
+                 var coder = contextManager.getLlm(contextManager.getService().quickModel(), "Full File Replacement: " + file.getFileName());
 
                  // Send request
                  StreamingResult result = coder.sendRequest(messages, false);
@@ -674,24 +674,19 @@ public class CodeAgent {
         }
 
         io.llmOutput("\nRunning verification command: " + verificationCommand, ChatMessageType.CUSTOM);
-        io.llmOutput("```bash\n", ChatMessageType.CUSTOM);
+        io.llmOutput("\n```bash\n", ChatMessageType.CUSTOM);
         try {
             var output = Environment.instance.runShellCommand(verificationCommand,
                                                               cm.getProject().getRoot(),
                                                               line -> io.llmOutput(line + "\n", ChatMessageType.CUSTOM));
             logger.debug("Verification command successful. Output: {}", output);
-            io.llmOutput("```\n", ChatMessageType.CUSTOM);
-            io.llmOutput("\n## Verification successful", ChatMessageType.CUSTOM);
+            io.llmOutput("\n```", ChatMessageType.CUSTOM);
+            io.llmOutput("\n**Verification successful**", ChatMessageType.CUSTOM);
             return "";
         } catch (Environment.SubprocessException e) {
-            io.llmOutput("```\n", ChatMessageType.CUSTOM); // Close the markdown block
+            io.llmOutput("\n```", ChatMessageType.CUSTOM); // Close the markdown block
+            io.llmOutput("\n**Verification failed**", ChatMessageType.CUSTOM);
             logger.warn("Verification command failed: {} Output: {}", e.getMessage(), e.getOutput(), e);
-            io.llmOutput("""
-                         \n**Verification Failed:** %s
-                         ```bash
-                         %s
-                         ```
-                         """.stripIndent().formatted(e.getMessage(), e.getOutput()), ChatMessageType.CUSTOM);
             // Add the combined error and output to the history for the next request
             return e.getMessage() + "\n\n" + e.getOutput();
         }

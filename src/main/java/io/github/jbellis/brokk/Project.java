@@ -3,6 +3,7 @@ package io.github.jbellis.brokk;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.jbellis.brokk.Service.ModelConfig;
 import io.github.jbellis.brokk.agents.BuildAgent;
 import io.github.jbellis.brokk.analyzer.Language;
 import io.github.jbellis.brokk.analyzer.ProjectFile;
@@ -37,16 +38,20 @@ public class Project implements IProject, AutoCloseable {
     private static final ObjectMapper objectMapper = new ObjectMapper();
     private static final Logger logger = LogManager.getLogger(Project.class);
     private static final String BUILD_DETAILS_KEY = "buildDetailsJson";
-    private static final String ARCHITECT_MODEL_KEY = "architectModel";
-    private static final String CODE_MODEL_KEY = "codeModel";
-    private static final String ASK_MODEL_KEY = "askModel"; // Added for Ask
-    private static final String EDIT_MODEL_KEY = "editModel";
-    private static final String SEARCH_MODEL_KEY = "searchModel";
-    private static final String ARCHITECT_REASONING_KEY = "architectReasoning";
-    private static final String CODE_REASONING_KEY = "codeReasoning";
-    private static final String ASK_REASONING_KEY = "askReasoning";
-    private static final String EDIT_REASONING_KEY = "editReasoning";
-    private static final String SEARCH_REASONING_KEY = "searchReasoning";
+    private static final String CODE_INTELLIGENCE_LANGUAGES_KEY = "code_intelligence_languages";
+
+    // Helper structure for managing model type configurations
+    // Includes old keys for migration purposes.
+    private record ModelTypeInfo(String configKey, ModelConfig preferredConfig, String oldModelNameKey, String oldReasoningKey) {}
+
+    private static final Map<String, ModelTypeInfo> MODEL_TYPE_INFOS = Map.of(
+        "Architect", new ModelTypeInfo("architectConfig", new ModelConfig(Service.O3, Service.ReasoningLevel.HIGH), "architectModel", "architectReasoning"),
+        "Code", new ModelTypeInfo("codeConfig", new ModelConfig(Service.GEMINI_2_5_PRO, Service.ReasoningLevel.DEFAULT), "codeModel", "codeReasoning"),
+        "Ask", new ModelTypeInfo("askConfig", new ModelConfig(Service.GEMINI_2_5_PRO, Service.ReasoningLevel.DEFAULT), "askModel", "askReasoning"),
+        "Edit", new ModelTypeInfo("editConfig", new ModelConfig(Service.GEMINI_2_5_PRO, Service.ReasoningLevel.LOW), "editModel", "editReasoning"),
+        "Search", new ModelTypeInfo("searchConfig", new ModelConfig(Service.GEMINI_2_5_PRO, Service.ReasoningLevel.DEFAULT), "searchModel", "searchReasoning")
+    );
+
     private static final String CODE_AGENT_TEST_SCOPE_KEY = "codeAgentTestScope";
     private static final String COMMIT_MESSAGE_FORMAT_KEY = "commitMessageFormat";
 
@@ -63,7 +68,6 @@ public class Project implements IProject, AutoCloseable {
     private static final Path BROKK_CONFIG_DIR = Path.of(System.getProperty("user.home"), ".config", "brokk");
     private static final Path PROJECTS_PROPERTIES_PATH = BROKK_CONFIG_DIR.resolve("projects.properties");
     private static final Path GLOBAL_PROPERTIES_PATH = BROKK_CONFIG_DIR.resolve("brokk.properties");
-    private static final String LLM_PROXY_KEY = "llmProxyUrl";
 
     // New enum to represent just which proxy to use
     public enum LlmProxySetting {BROKK, LOCALHOST, STAGING}
@@ -150,9 +154,69 @@ public class Project implements IProject, AutoCloseable {
                 props.load(reader);
             } catch (IOException e) {
                 logger.warn("Unable to read global properties file: {}", e.getMessage());
+                // Return empty props if read fails, to avoid processing potentially corrupted data
+                return props;
             }
         }
+
+        // Attempt to migrate old model configuration keys
+        boolean migrated = migrateOldModelConfigsIfNecessary(props);
+        if (migrated) {
+            // Save properties immediately if migration occurred
+            // This avoids re-migration attempts and ensures consistency
+            saveGlobalProperties(props);
+        }
         return props;
+    }
+
+    /**
+     * Checks for old-style model name/reasoning properties and converts them to the new JSON-based single property.
+     * Modifies the passed-in Properties object directly.
+     *
+     * @param props The Properties object to check and modify.
+     * @return true if any migration was performed, false otherwise.
+     */
+    private static boolean migrateOldModelConfigsIfNecessary(Properties props) {
+        boolean changed = false;
+        for (var entry : MODEL_TYPE_INFOS.entrySet()) {
+            String modelType = entry.getKey();
+            ModelTypeInfo typeInfo = entry.getValue();
+
+            // Check if old keys exist AND new key does NOT
+            if (props.containsKey(typeInfo.oldModelNameKey()) && !props.containsKey(typeInfo.configKey())) {
+                String modelName = props.getProperty(typeInfo.oldModelNameKey());
+                // Old reasoning might be missing, default to preferred in that case
+                Service.ReasoningLevel reasoningLevel = Service.ReasoningLevel.fromString(
+                    props.getProperty(typeInfo.oldReasoningKey()),
+                    typeInfo.preferredConfig().reasoning()
+                );
+
+                if (modelName == null || modelName.isBlank()) {
+                    // This case should be rare if oldModelNameKey exists, but handle defensively.
+                    logger.warn("Old model name key '{}' for {} exists but value is blank. Skipping migration for this type.", typeInfo.oldModelNameKey(), modelType);
+                    continue;
+                }
+
+                ModelConfig migratedConfig = new ModelConfig(modelName, reasoningLevel);
+                try {
+                    String jsonString = objectMapper.writeValueAsString(migratedConfig);
+                    props.setProperty(typeInfo.configKey(), jsonString);
+                    props.remove(typeInfo.oldModelNameKey());
+                    // oldReasoningKey might be null in ModelTypeInfo if it wasn't used historically,
+                    // but for current models, it should exist.
+                    if (typeInfo.oldReasoningKey() != null) {
+                         props.remove(typeInfo.oldReasoningKey());
+                    }
+                    changed = true;
+                    logger.info("Migrated model config for {} from old keys ('{}', '{}') to new key '{}'.",
+                                modelType, typeInfo.oldModelNameKey(), typeInfo.oldReasoningKey(), typeInfo.configKey());
+                } catch (JsonProcessingException e) {
+                    logger.error("Error serializing migrated ModelConfig for {} to JSON. Old keys ('{}', '{}') will be kept. Error: {}",
+                                 modelType, typeInfo.oldModelNameKey(), typeInfo.oldReasoningKey(), e.getMessage());
+                }
+            }
+        }
+        return changed;
     }
 
     /**
@@ -281,175 +345,116 @@ public class Project implements IProject, AutoCloseable {
     }
 
     /**
-     * Gets the configured model name for architect/agent tasks.
+     * Internal helper to get a ModelConfig for a given model type.
+     * Reads from global properties, deserializes JSON, or returns preferred default.
      */
-    public String getArchitectModelName() {
-        var props = loadGlobalProperties();
-        return props.getProperty(ARCHITECT_MODEL_KEY, Service.GEMINI_2_5_PRO);
+    private ModelConfig getModelConfigInternal(String modelTypeKey) {
+        var props = loadGlobalProperties(); // Ensures migration has run if needed
+        var typeInfo = MODEL_TYPE_INFOS.get(modelTypeKey);
+        assert typeInfo != null : "Unknown modelTypeKey: " + modelTypeKey;
+
+        String jsonString = props.getProperty(typeInfo.configKey());
+        if (jsonString != null && !jsonString.isBlank()) {
+            try {
+                return objectMapper.readValue(jsonString, ModelConfig.class);
+            } catch (JsonProcessingException e) {
+                logger.warn("Error parsing ModelConfig JSON for {} from key '{}': {}. Using preferred default. JSON: '{}'",
+                            modelTypeKey, typeInfo.configKey(), e.getMessage(), jsonString);
+                // Fall through to return preferred default
+            }
+        }
+        return typeInfo.preferredConfig();
     }
 
     /**
-     * Sets the model name for architect/agent tasks.
+     * Internal helper to set a ModelConfig for a given model type.
+     * Serializes to JSON and saves to global properties.
      */
-    public void setArchitectModelName(String modelName) {
-        var props = loadGlobalProperties();
-        props.setProperty(ARCHITECT_MODEL_KEY, modelName);
-        saveGlobalProperties(props);
+    private void setModelConfigInternal(String modelTypeKey, ModelConfig config) {
+        assert config != null;
+        var props = loadGlobalProperties(); // Ensures migration has run if needed
+        var typeInfo = MODEL_TYPE_INFOS.get(modelTypeKey);
+        assert typeInfo != null : "Unknown modelTypeKey: " + modelTypeKey;
+
+        try {
+            String jsonString = objectMapper.writeValueAsString(config);
+            props.setProperty(typeInfo.configKey(), jsonString);
+            saveGlobalProperties(props);
+        } catch (JsonProcessingException e) {
+            // Log error and rethrow as unchecked, as this indicates a programming error (e.g., unmarshallable config)
+            logger.error("Error serializing ModelConfig for {} (key '{}'): {}", modelTypeKey, typeInfo.configKey(), config, e);
+            throw new RuntimeException("Failed to serialize ModelConfig for " + modelTypeKey, e);
+        }
     }
 
     /**
-     * Gets the configured model name for code generation tasks.
+     * Gets the configured model and reasoning for architect tasks.
      */
-    public String getCodeModelName() {
-        var props = loadGlobalProperties();
-        return props.getProperty(CODE_MODEL_KEY, Service.GEMINI_2_5_PRO);
+    public ModelConfig getArchitectModelConfig() {
+        return getModelConfigInternal("Architect");
     }
 
     /**
-     * Sets the model name for code generation tasks.
+     * Sets the model and reasoning for architect tasks.
      */
-    public void setCodeModelName(String modelName) {
-        var props = loadGlobalProperties();
-        props.setProperty(CODE_MODEL_KEY, modelName);
-        saveGlobalProperties(props);
+    public void setArchitectModelConfig(ModelConfig config) {
+        setModelConfigInternal("Architect", config);
     }
 
     /**
-     * Gets the configured model name for ask tasks.
+     * Gets the configured model and reasoning for code generation tasks.
      */
-    public String getAskModelName() {
-        var props = loadGlobalProperties();
-        return props.getProperty(ASK_MODEL_KEY, Service.GEMINI_2_5_PRO);
+    public ModelConfig getCodeModelConfig() {
+        return getModelConfigInternal("Code");
     }
 
     /**
-     * Sets the model name for ask tasks.
+     * Sets the model and reasoning for code generation tasks.
      */
-    public void setAskModelName(String modelName) {
-        var props = loadGlobalProperties();
-        props.setProperty(ASK_MODEL_KEY, modelName);
-        saveGlobalProperties(props);
-    }
-
-
-    /**
-     * Gets the configured model name for edit tasks.
-     */
-    public String getEditModelName() {
-        var props = loadGlobalProperties();
-        return props.getProperty(EDIT_MODEL_KEY, Service.GEMINI_2_5_PRO);
+    public void setCodeModelConfig(ModelConfig config) {
+        setModelConfigInternal("Code", config);
     }
 
     /**
-     * Sets the model name for edit tasks.
+     * Gets the configured model and reasoning for ask tasks.
      */
-    public void setEditModelName(String modelName) {
-        var props = loadGlobalProperties();
-        props.setProperty(EDIT_MODEL_KEY, modelName);
-        saveGlobalProperties(props);
+    public ModelConfig getAskModelConfig() {
+        return getModelConfigInternal("Ask");
     }
 
     /**
-     * Gets the reasoning level for architect tasks. Defaults to DEFAULT.
+     * Sets the model and reasoning for ask tasks.
      */
-    public ReasoningLevel getArchitectReasoningLevel() {
-        var props = loadGlobalProperties();
-        return ReasoningLevel.fromString(props.getProperty(ARCHITECT_REASONING_KEY), ReasoningLevel.HIGH);
+    public void setAskModelConfig(ModelConfig config) {
+        setModelConfigInternal("Ask", config);
     }
 
     /**
-     * Sets the reasoning level for architect tasks.
+     * Gets the configured model and reasoning for edit tasks.
      */
-    public void setArchitectReasoningLevel(ReasoningLevel level) {
-        var props = loadGlobalProperties();
-        props.setProperty(ARCHITECT_REASONING_KEY, level.name());
-        saveGlobalProperties(props);
+    public ModelConfig getEditModelConfig() {
+        return getModelConfigInternal("Edit");
     }
 
     /**
-     * Gets the reasoning level for code tasks. Defaults to DEFAULT.
+     * Sets the model and reasoning for edit tasks.
      */
-    public ReasoningLevel getCodeReasoningLevel() {
-        var props = loadGlobalProperties();
-        return ReasoningLevel.fromString(props.getProperty(CODE_REASONING_KEY), ReasoningLevel.DEFAULT);
+    public void setEditModelConfig(ModelConfig config) {
+        setModelConfigInternal("Edit", config);
     }
 
     /**
-     * Sets the reasoning level for code tasks.
+     * Gets the configured model and reasoning for search tasks.
      */
-    public void setCodeReasoningLevel(ReasoningLevel level) {
-        var props = loadGlobalProperties();
-        props.setProperty(CODE_REASONING_KEY, level.name());
-        saveGlobalProperties(props);
+    public ModelConfig getSearchModelConfig() {
+        return getModelConfigInternal("Search");
     }
 
     /**
-     * Gets the reasoning level for ask tasks. Defaults to DEFAULT.
+     * Sets the model and reasoning for search tasks.
      */
-    public ReasoningLevel getAskReasoningLevel() {
-        var props = loadGlobalProperties();
-        return ReasoningLevel.fromString(props.getProperty(ASK_REASONING_KEY), ReasoningLevel.DEFAULT);
-    }
-
-    /**
-     * Sets the reasoning level for ask tasks.
-     */
-    public void setAskReasoningLevel(ReasoningLevel level) {
-        var props = loadGlobalProperties();
-        props.setProperty(ASK_REASONING_KEY, level.name());
-        saveGlobalProperties(props);
-    }
-
-    /**
-     * Gets the reasoning level for edit tasks. Defaults to LOW.
-     */
-    public ReasoningLevel getEditReasoningLevel() {
-        var props = loadGlobalProperties();
-        return ReasoningLevel.fromString(props.getProperty(EDIT_REASONING_KEY), ReasoningLevel.LOW);
-    }
-
-    /**
-     * Sets the reasoning level for edit tasks.
-     */
-    public void setEditReasoningLevel(ReasoningLevel level) {
-        var props = loadGlobalProperties();
-        props.setProperty(EDIT_REASONING_KEY, level.name());
-        saveGlobalProperties(props);
-    }
-
-    /**
-     * Gets the reasoning level for search tasks. Defaults to DEFAULT.
-     */
-    public ReasoningLevel getSearchReasoningLevel() {
-        var props = loadGlobalProperties();
-        return ReasoningLevel.fromString(props.getProperty(SEARCH_REASONING_KEY), ReasoningLevel.DEFAULT);
-    }
-
-    /**
-     * Sets the reasoning level for search tasks.
-     */
-    public void setSearchReasoningLevel(ReasoningLevel level) {
-        var props = loadGlobalProperties();
-        props.setProperty(SEARCH_REASONING_KEY, level.name());
-        saveGlobalProperties(props);
-    }
-
-    /**
-     * Gets the configured model name for search/RAG tasks.
-     * Falls back to the default search model if not set.
-     */
-    public String getSearchModelName() {
-        var props = loadGlobalProperties();
-        return props.getProperty(SEARCH_MODEL_KEY, Service.GEMINI_2_5_PRO);
-    }
-
-    /**
-     * Sets the model name for search/RAG tasks.
-     */
-    public void setSearchModelName(String modelName) {
-        var props = loadGlobalProperties();
-        props.setProperty(SEARCH_MODEL_KEY, modelName);
-        saveGlobalProperties(props);
+    public void setSearchModelConfig(ModelConfig config) {
+        setModelConfigInternal("Search", config);
     }
 
     /**
@@ -479,48 +484,89 @@ public class Project implements IProject, AutoCloseable {
     }
 
     @Override
-    public Language getAnalyzerLanguage() {
-        String lang = projectProps.getProperty("code_intelligence_language");
-        if (lang == null || lang.isBlank()) {
-            // Scan project files to determine the most common language if not specified
-            var languageCounts = repo.getTrackedFiles().stream()
-                                     .map(ProjectFile::extension)
-                                     .map(Language::fromExtension)            // Map extension to Language
-                                     .filter(l -> l != Language.NONE)         // Ignore files with unknown/no extensions
-                                     .collect(Collectors.groupingBy(l -> l, Collectors.counting())); // Count occurrences
-
-            // Find the language with the highest count
-            var dominantLanguage = languageCounts.entrySet().stream()
-                                                 .max(Map.Entry.comparingByValue())
-                                                 .map(Map.Entry::getKey);
-
-            // Save and return the dominant language
-            var detectedLanguage = dominantLanguage.orElse(Language.NONE);
-            logger.debug("Detected dominant language for {} based on file extensions: {}", root, detectedLanguage);
-            projectProps.setProperty("code_intelligence_language", detectedLanguage.name());
-            saveProjectProperties();
-
-            return detectedLanguage;
+    public Set<Language> getAnalyzerLanguages() {
+        String langsProp = projectProps.getProperty(CODE_INTELLIGENCE_LANGUAGES_KEY);
+        if (langsProp != null && !langsProp.isBlank()) {
+            // User has explicitly set languages, use those.
+            return Arrays.stream(langsProp.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .map(langName -> {
+                    try {
+                        return Language.valueOf(langName.toUpperCase());
+                    } catch (IllegalArgumentException e) {
+                        logger.warn("Invalid language '{}' in project properties, ignoring.", langName);
+                        return null;
+                    }
+                })
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
         }
 
-        try {
-            // Convert the stored name (e.g., "Java", "Python") to the Brokk Language enum object
-            return Language.valueOf(lang.toUpperCase());
-        } catch (IllegalArgumentException e) {
-            // Fallback to NONE if the stored language name is invalid
-            return Language.NONE;
+        // Auto-detect languages:
+        // 1. Include all languages with >= 10% of recognized (non-NONE) files.
+        // 2. If #1 results in an empty set, include the most common recognized language.
+        // 3. Always include SQL if any SQL files are present.
+        // This is the runtime default if no specific languages are set in projectProps.
+        // This detected default is NOT written back to projectProps automatically.
+        Map<Language, Long> languageCounts = repo.getTrackedFiles().stream()
+            .map(ProjectFile::extension)
+            .map(Language::fromExtension)
+            .filter(l -> l != Language.NONE) // Ignore files with no specific language or unclassifiable extensions
+            .collect(Collectors.groupingBy(l -> l, Collectors.counting()));
+
+        if (languageCounts.isEmpty()) {
+            logger.debug("No files with recognized (non-NONE) languages found for {}. Defaulting to Language.NONE.", root);
+            return Set.of(Language.NONE);
         }
+
+        long totalRecognizedFiles = languageCounts.values().stream().mapToLong(Long::longValue).sum();
+        // totalRecognizedFiles is > 0 here because languageCounts is not empty.
+
+        Set<Language> detectedLanguages = new HashSet<>();
+
+        // 1. Include all languages with >= 10% of recognized (non-NONE) files.
+        languageCounts.entrySet().stream()
+            .filter(entry -> (double) entry.getValue() / totalRecognizedFiles >= 0.10)
+            .forEach(entry -> detectedLanguages.add(entry.getKey()));
+
+        // 2. If #1 results in an empty set (and languageCounts is not empty),
+        //    include the most common recognized language.
+        if (detectedLanguages.isEmpty()) {
+            // languageCounts is guaranteed non-empty here.
+            var mostCommonEntry = languageCounts.entrySet().stream()
+                .max(Map.Entry.comparingByValue())
+                .orElseThrow(); // Should not happen as languageCounts is not empty
+            detectedLanguages.add(mostCommonEntry.getKey());
+            logger.debug("No language met 10% threshold for {}. Adding most common: {}", root, mostCommonEntry.getKey().name());
+        }
+
+        // 3. Always include SQL if any SQL files are present.
+        if (languageCounts.containsKey(Language.SQL)) {
+            boolean addedByThisRule = detectedLanguages.add(Language.SQL);
+            if (addedByThisRule) {
+                logger.debug("SQL files present for {}, ensuring SQL is included in detected languages.", root);
+            }
+        }
+
+        // If languageCounts was not empty, detectedLanguages should not be empty at this point.
+        logger.debug("Auto-detected languages for {}: {}", root,
+                     detectedLanguages.stream().map(Language::name).collect(Collectors.joining(", ")));
+        return detectedLanguages;
     }
 
     /**
-     * Sets the primary language for code intelligence.
-     * @param language The language to set.
+     * Sets the primary languages for code intelligence.
+     * @param languages The set of languages to set.
      */
-    public void setAnalyzerLanguage(Language language) {
-        if (language == null || language == Language.NONE) {
-            projectProps.remove("code_intelligence_language");
+    public void setAnalyzerLanguages(Set<Language> languages) {
+        if (languages == null || languages.isEmpty() || (languages.size() == 1 && languages.contains(Language.NONE))) {
+            projectProps.remove(CODE_INTELLIGENCE_LANGUAGES_KEY);
         } else {
-            projectProps.setProperty("code_intelligence_language", language.name()); // Store the enum name
+            String langsString = languages.stream()
+                .map(Language::name)
+                .collect(Collectors.joining(","));
+            projectProps.setProperty(CODE_INTELLIGENCE_LANGUAGES_KEY, langsString);
         }
         saveProjectProperties();
         // Request for analyzer rebuild is now handled by ContextManager after this call
@@ -1131,26 +1177,6 @@ public class Project implements IProject, AutoCloseable {
     }
 
     /**
-     * Sets the global LLM proxy URL (including scheme, e.g., "https://...").
-     * If the provided URL is null, blank, or matches the default, the setting is
-     * removed from the properties file, effectively reverting to the default.
-     *
-     * @param proxyUrl The proxy URL (including scheme) to save, or null/blank/default to revert to default.
-     */
-    public static void setLlmProxy(String proxyUrl) {
-        var props = loadGlobalProperties();
-        if (proxyUrl == null || proxyUrl.isBlank() || proxyUrl.trim().equals(BROKK_PROXY_URL)) {
-            props.remove(LLM_PROXY_KEY);
-            logger.debug("Removing LLM proxy setting, reverting to default: {}", BROKK_PROXY_URL);
-        } else {
-            props.setProperty(LLM_PROXY_KEY, proxyUrl.trim());
-            logger.debug("Setting LLM proxy to: {}", proxyUrl.trim());
-        }
-        saveGlobalProperties(props);
-    }
-
-
-    /**
      * Sets the global UI theme
      *
      * @param theme "dark" or "light"
@@ -1159,105 +1185,6 @@ public class Project implements IProject, AutoCloseable {
         var props = loadGlobalProperties();
         props.setProperty("theme", theme);
         saveGlobalProperties(props);
-    }
-
-    /**
-     * Checks configured models against available ones and temporarily overrides missing ones in memory.
-     * Does NOT save the changes to disk.
-     *
-     * @param availableModels     Set of display names of models currently available.
-     * @param genericDefaultModel The model name to use as a final fallback if a configured or preferred default is missing.
-     * @return A list of warning messages describing the overrides performed.
-     */
-    @Override
-    public List<String> overrideMissingModels(Set<String> availableModels, String genericDefaultModel) {
-        var warnings = new ArrayList<String>();
-        var globalProps = loadGlobalProperties();
-        boolean changed = false;
-
-        // Define preferred defaults for each model type
-        var preferredDefaults = Map.of(ARCHITECT_MODEL_KEY, Service.O3,
-                                       CODE_MODEL_KEY, Service.GEMINI_2_5_PRO,
-                                       ASK_MODEL_KEY, Service.GEMINI_2_5_PRO,
-                                       EDIT_MODEL_KEY, Service.GEMINI_2_5_PRO,
-                                       SEARCH_MODEL_KEY, Service.GEMINI_2_5_PRO);
-
-        for (var e : preferredDefaults.entrySet()) {
-            var key = e.getKey();
-            var preferredDefault = e.getValue();
-            var configuredModel = globalProps.getProperty(key);
-            String modelToUse;
-            String reason;
-
-            if (configuredModel != null && !configuredModel.isBlank() && availableModels.contains(configuredModel)) {
-                // Use configured and available model
-                modelToUse = configuredModel;
-                reason = "Using configured model";
-            } else {
-                // Configured model is unavailable or null, check preferred default
-                if (availableModels.contains(preferredDefault)) {
-                    modelToUse = preferredDefault;
-                    if (configuredModel != null && !configuredModel.isBlank()) { // Only warn if there was a specific (but unavailable) configuration
-                        warnings.add(String.format("Configured %s model '%s' is not available. Temporarily using preferred default '%s'.",
-                                                   key, configuredModel, modelToUse));
-                    }
-                    reason = String.format("Setting %s model to available preferred default '%s' (configured was '%s')", key, modelToUse, configuredModel);
-                } else {
-                    // Preferred default is also unavailable, use generic default
-                    modelToUse = genericDefaultModel;
-                     if (configuredModel != null && !configuredModel.isBlank()) { // Warn if there was a specific configuration
-                        warnings.add(String.format("Configured %s model '%s' and preferred default '%s' are not available. Temporarily using generic default '%s'.",
-                                                   key, configuredModel, preferredDefault, modelToUse));
-                    } else if (!availableModels.contains(preferredDefault)) { // Warn if preferred default was also unavailable
-                         warnings.add(String.format("Preferred default %s model '%s' is not available. Temporarily using generic default '%s'.",
-                                                    key, preferredDefault, modelToUse));
-                     }
-                    reason = String.format("Setting %s model to generic default '%s' (configured was '%s', preferred default was '%s')", key, modelToUse, configuredModel, preferredDefault);
-                }
-            }
-
-            // Set the determined model in globalProps if it's different from what was loaded or if it was null
-            assert modelToUse != null;
-            if (!modelToUse.equals(configuredModel)) {
-                globalProps.setProperty(key, modelToUse);
-                changed = true;
-                logger.debug("{} model set to '{}' in global properties (was '{}'). Reason: {}.", key, modelToUse, configuredModel, reason);
-            } else {
-                logger.trace("{} model remains '{}'. Reason: {}.", key, modelToUse, reason);
-            }
-        }
-
-        if (changed) {
-            saveGlobalProperties(globalProps);
-        }
-        return warnings;
-    }
-
-    /**
-     * Enum defining the reasoning effort levels for models.
-     */
-    public enum ReasoningLevel {
-        DEFAULT, LOW, MEDIUM, HIGH;
-
-        @Override
-        public String toString() {
-            // Capitalize first letter for display
-            return name().charAt(0) + name().substring(1).toLowerCase();
-        }
-
-        /**
-         * Converts a String to a ReasoningLevel, falling back to the provided default.
-         */
-        public static ReasoningLevel fromString(String value, ReasoningLevel defaultLevel) {
-            if (value == null || value.isBlank()) {
-                return defaultLevel;
-            }
-            try {
-                return ReasoningLevel.valueOf(value.toUpperCase());
-            } catch (IllegalArgumentException e) {
-                return defaultLevel; // Fallback to provided default if string is invalid
-            }
-        }
     }
 
     /**
@@ -1330,10 +1257,10 @@ public class Project implements IProject, AutoCloseable {
      * Default favorite model aliases.
      */
     public static final List<Service.FavoriteModel> DEFAULT_FAVORITE_MODELS = List.of(
-            new Service.FavoriteModel("o3", Service.O3, ReasoningLevel.DEFAULT),
-            new Service.FavoriteModel("Gemini Pro 2.5", Service.GEMINI_2_5_PRO, ReasoningLevel.DEFAULT),
-            new Service.FavoriteModel("Sonnet 3.7", "claude-3.7-sonnet", ReasoningLevel.DEFAULT),
-            new Service.FavoriteModel("Flash 2.0", "gemini-2.0-flash", ReasoningLevel.DEFAULT)
+            new Service.FavoriteModel("o3", Service.O3, Service.ReasoningLevel.DEFAULT),
+            new Service.FavoriteModel("Gemini Pro 2.5", Service.GEMINI_2_5_PRO, Service.ReasoningLevel.DEFAULT),
+            new Service.FavoriteModel("Sonnet 3.7", "claude-3.7-sonnet", Service.ReasoningLevel.DEFAULT),
+            new Service.FavoriteModel("Flash 2.0", "gemini-2.0-flash", Service.ReasoningLevel.DEFAULT)
     );
 
     /**
