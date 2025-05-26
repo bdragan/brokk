@@ -179,12 +179,12 @@ public class WorkspacePanel extends JPanel {
             public void mousePressed(MouseEvent e) {
                 maybeHandleFileRefClick(e);
             }
-            
+
             @Override
             public void mouseReleased(MouseEvent e) {
                 maybeHandleFileRefClick(e);
             }
-            
+
             private void maybeHandleFileRefClick(MouseEvent e) {
                 int col = contextTable.columnAtPoint(e.getPoint());
                 if (col == FILES_REFERENCED_COLUMN) {
@@ -198,7 +198,7 @@ public class WorkspacePanel extends JPanel {
                 }
             }
         });
-        
+
         // Add mouse motion for tooltips
         contextTable.addMouseMotionListener(new MouseAdapter() {
             @Override
@@ -352,8 +352,8 @@ public class WorkspacePanel extends JPanel {
                                         .collect(Collectors.toSet());
 
                                 boolean allFilesAreTrackedProjectFiles = !allFiles.isEmpty() && allFiles.stream().allMatch(f ->
-                                        f instanceof ProjectFile pf &&
-                                        project.getRepo().getTrackedFiles().contains(pf)
+                                                                                                                                   f instanceof ProjectFile pf &&
+                                                                                                                                           project.getRepo().getTrackedFiles().contains(pf)
                                 );
                                 boolean hasFiles = !allFiles.isEmpty(); // Re-introduce hasFiles
 
@@ -1000,7 +1000,7 @@ public class WorkspacePanel extends JPanel {
     public Future<?> performContextActionAsync(ContextAction action, List<? extends ContextFragment> selectedFragments) // Use wildcard
     {
         // Use submitContextTask from ContextManager to run the action on the appropriate executor
-        return contextManager.submitContextTask(action + " action", () -> { 
+        return contextManager.submitContextTask(action + " action", () -> {
             try {
                 switch (action) {
                     case EDIT -> doEditAction(selectedFragments);
@@ -1011,57 +1011,41 @@ public class WorkspacePanel extends JPanel {
                     case PASTE -> doPasteAction();
                 }
             } catch (CancellationException cex) {
-                chrome.systemOutput(action + " canceled."); 
+                chrome.systemOutput(action + " canceled.");
             }
             // No finally block needed here as submitContextTask handles enabling buttons
         });
     }
 
 
-    /** Edit Action: edit ONLY Git-tracked ProjectFiles */
-    private void doEditAction(List<? extends ContextFragment> selectedFragments) {
+    /** Edit Action: Only allows selecting Project Files */
+    private void doEditAction(List<? extends ContextFragment> selectedFragments) { // Use wildcard
         var project = contextManager.getProject();
-        var trackedFiles = project.getRepo().getTrackedFiles();  
-
-        // Gather candidate files
-        Set<ProjectFile> candidateFiles = new HashSet<>();
-
         if (selectedFragments.isEmpty()) {
             // Show dialog allowing ONLY file selection (no external)
-            var selection = showMultiSourceSelectionDialog(
-                    "Edit Files",
-                    false,                                          // No external files for edit
-                    CompletableFuture.completedFuture(trackedFiles),// autocomplete list
-                    Set.of(SelectionMode.FILES)                     // Only FILES mode
-            );
+            var selection = showMultiSourceSelectionDialog("Edit Files",
+                                                           false, // No external files for edit
+                                                           CompletableFuture.completedFuture(project.getRepo().getTrackedFiles()), // Only tracked files
+                                                           Set.of(SelectionMode.FILES)); // Only FILES mode
+
             if (selection != null && selection.files() != null && !selection.files().isEmpty()) {
                 // We disallowed external files, so this cast should be safe
                 var projectFiles = toProjectFilesUnsafe(selection.files());
-                candidateFiles.addAll(projectFiles);
+                contextManager.editFiles(projectFiles);
             }
         } else {
-            // Collect files referenced by selected fragments
+            // Edit files from selected fragments
+            var files = new HashSet<ProjectFile>();
             for (var fragment : selectedFragments) {
-                candidateFiles.addAll(fragment.files(project));
+                files.addAll(fragment.files(project));
             }
+            contextManager.editFiles(files);
         }
-
-        // Keep only git-tracked ProjectFiles
-        var filesToEdit = candidateFiles.stream()
-                                        .filter(trackedFiles::contains)
-                                        .collect(Collectors.toSet());
-
-        if (filesToEdit.isEmpty()) {
-            chrome.toolErrorRaw("No git-tracked files selected to edit.");
-            return;
-        }
-
-        contextManager.editFiles(filesToEdit);
     }
 
     /** Read Action: Allows selecting Files (internal/external) */
     private void doReadAction(List<? extends ContextFragment> selectedFragments) { // Use wildcard
-        var project = contextManager.getProject(); 
+        var project = contextManager.getProject();
         if (selectedFragments.isEmpty()) {
             // Show dialog allowing ONLY file selection (internal + external)
             // TODO when we can extract a single class from a source file, enable classes as well
@@ -1074,15 +1058,15 @@ public class WorkspacePanel extends JPanel {
                 return;
             }
 
-            contextManager.addReadOnlyFiles(selection.files()); 
-            chrome.systemOutput("Added " + selection.files().size() + " file(s) as read-only context."); 
+            contextManager.addReadOnlyFiles(selection.files());
+            chrome.systemOutput("Added " + selection.files().size() + " file(s) as read-only context.");
         } else {
             // Add files from selected fragments
             var files = new HashSet<BrokkFile>();
             for (var fragment : selectedFragments) {
                 files.addAll(fragment.files(project));
             }
-            contextManager.addReadOnlyFiles(files); 
+            contextManager.addReadOnlyFiles(files);
         }
     }
 
@@ -1091,7 +1075,7 @@ public class WorkspacePanel extends JPanel {
         var sel = new java.awt.datatransfer.StringSelection(content);
         var cb = java.awt.Toolkit.getDefaultToolkit().getSystemClipboard();
         cb.setContents(sel, sel);
-        chrome.systemOutput("Content copied to clipboard"); 
+        chrome.systemOutput("Content copied to clipboard");
     }
 
     private @NotNull String getSelectedContent(List<? extends ContextFragment> selectedFragments) {
@@ -1170,19 +1154,19 @@ public class WorkspacePanel extends JPanel {
                     }
 
                     if (image != null) {
-                            contextManager.addPastedImageFragment(image);
-                            chrome.systemOutput("Pasted image added to context");
-                            return;
-                        }
-                    }
-                } catch (Exception e) {
-                    if (e.getMessage() != null && e.getMessage().contains("INCR")) {
-                        chrome.toolErrorRaw("Unable to paste image data from Windows to Brokk running under WSL. This is a limitation of WSL. You can write the image to a file and read it that way instead.");
+                        contextManager.addPastedImageFragment(image);
+                        chrome.systemOutput("Pasted image added to context");
                         return;
                     }
-                    logger.error("Failed to process image flavor: {}", flavor.getMimeType(), e);
                 }
+            } catch (Exception e) {
+                if (e.getMessage() != null && e.getMessage().contains("INCR")) {
+                    chrome.toolErrorRaw("Unable to paste image data from Windows to Brokk running under WSL. This is a limitation of WSL. You can write the image to a file and read it that way instead.");
+                    return;
+                }
+                logger.error("Failed to process image flavor: {}", flavor.getMimeType(), e);
             }
+        }
 
         // Text Flavor
         if (contents.isDataFlavorSupported(java.awt.datatransfer.DataFlavor.stringFlavor)) {
@@ -1277,11 +1261,11 @@ public class WorkspacePanel extends JPanel {
     private void doDropAction(List<? extends ContextFragment> selectedFragments) // Use wildcard
     {
         if (selectedFragments.isEmpty()) {
-            if (contextManager.topContext().isEmpty()) { 
-                chrome.toolErrorRaw("No context to drop"); 
+            if (contextManager.topContext().isEmpty()) {
+                chrome.toolErrorRaw("No context to drop");
                 return;
             }
-            contextManager.dropAll(); 
+            contextManager.dropAll();
         } else {
             var pathFragsToRemove = new ArrayList<PathFragment>();
             var virtualToRemove = new ArrayList<VirtualFragment>();
@@ -1303,7 +1287,7 @@ public class WorkspacePanel extends JPanel {
                 chrome.systemOutput("Cleared task history");
             }
 
-            contextManager.drop(pathFragsToRemove, virtualToRemove); 
+            contextManager.drop(pathFragsToRemove, virtualToRemove);
 
             if (!pathFragsToRemove.isEmpty() || !virtualToRemove.isEmpty()) {
                 chrome.systemOutput("Dropped " + (pathFragsToRemove.size() + virtualToRemove.size()) + " items");
