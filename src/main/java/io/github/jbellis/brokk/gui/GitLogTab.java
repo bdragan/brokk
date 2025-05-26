@@ -559,7 +559,7 @@ public class GitLogTab extends JPanel {
         commitsPanelButtons.add(pullButton);
 
         pushButton = new JButton("Push");
-        pushButton.setToolTipText("Push commits to remote repository (test)");
+        pushButton.setToolTipText("Push commits to remote repository (test 2)");
         pushButton.setEnabled(false);
         pushButton.addActionListener(e -> pushBranch());
         commitsPanelButtons.add(pushButton);
