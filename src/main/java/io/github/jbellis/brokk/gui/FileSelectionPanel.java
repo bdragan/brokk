@@ -516,11 +516,49 @@ public class FileSelectionPanel extends JPanel {
         }
 
         private ShorthandCompletion createPathCompletion(Path path) {
-            String fullPath = path.toAbsolutePath().toString();
-            String fileName = path.getFileName().toString();
-            String replacementText = multiSelectMode ? quotePathIfNecessary(fullPath) + " " : fullPath;
-            // Display filename, summary is full path
-            return new ShorthandCompletion(this, fileName, replacementText, fullPath);
+            Path absolutePath = path.toAbsolutePath().normalize();
+
+            String pathForReplacement;
+            String summaryPathString;
+
+            if (!this.allowExternalFiles && this.project != null && absolutePath.startsWith(this.project.getRoot())) {
+                Path relativePath = this.project.getRoot().relativize(absolutePath);
+                if (relativePath.toString().isEmpty()) { // Path is the project root itself
+                    Path projectRootFileName = absolutePath.getFileName();
+                    String baseName = (projectRootFileName != null) ? projectRootFileName.toString() : ".";
+                    pathForReplacement = baseName;
+                    summaryPathString = baseName; //relative (or base name for root)
+                } else {
+                    pathForReplacement = relativePath.toString();
+                    summaryPathString = relativePath.toString(); // relative
+                }
+            } else {
+                // Path is external, or project conditions for relative path not met.
+                // Both pathForReplacement and summaryPathString should be absolute.
+                pathForReplacement = absolutePath.toString();
+                summaryPathString = absolutePath.toString(); // absolute
+            }
+
+            String displayFileName;
+            Path fileNamePath = absolutePath.getFileName();
+            if (fileNamePath == null) { // e.g. for root "C:/" or "/"
+                displayFileName = absolutePath.toString();
+            } else {
+                displayFileName = fileNamePath.toString();
+            }
+
+            if (Files.isDirectory(absolutePath)) {
+                String separator = absolutePath.getFileSystem().getSeparator();
+                if (!displayFileName.endsWith(separator)) {
+                    displayFileName += separator;
+                }
+                if (!pathForReplacement.endsWith(separator)) {
+                    pathForReplacement += separator;
+                }
+            }
+
+            String replacementText = multiSelectMode ? quotePathIfNecessary(pathForReplacement) + " " : pathForReplacement;
+            return new ShorthandCompletion(this, displayFileName, replacementText, summaryPathString);
         }
 
 
